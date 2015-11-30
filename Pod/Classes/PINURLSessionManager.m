@@ -72,18 +72,18 @@
 
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didReceiveChallenge:(NSURLAuthenticationChallenge *)challenge completionHandler:(void (^)(NSURLSessionAuthChallengeDisposition disposition, NSURLCredential *credential))completionHandler {
 	[self lock];
-        dispatch_queue_t delegateQueue = self.delegateQueues[@(task.taskIdentifier)];
+        dispatch_queue_t delegateQueue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0);
+        if (self.delegateQueues[@(task.taskIdentifier)]) {
+            delegateQueue = self.delegateQueues[@(task.taskIdentifier)];
+        }
 	[self unlock];
 	
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(delegateQueue, ^{
-        typeof(self) strongSelf = weakSelf;
-        if (strongSelf) {
-            if ([weakSelf.delegate respondsToSelector:@selector(didReceiveAuthenticationChallenge:forTask:completionHandler:)]) {
-                [weakSelf.delegate didReceiveAuthenticationChallenge:challenge forTask:task completionHandler:completionHandler];
-            } else {
-                completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
-            }
+        if ([weakSelf.delegate respondsToSelector:@selector(didReceiveAuthenticationChallenge:forTask:completionHandler:)]) {
+            [weakSelf.delegate didReceiveAuthenticationChallenge:challenge forTask:task completionHandler:completionHandler];
+        } else {
+            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
         }
 	});
 }
