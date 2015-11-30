@@ -77,10 +77,13 @@
 	
 	__weak typeof(self) weakSelf = self;
 	dispatch_async(delegateQueue, ^{
-		if ([weakSelf.delegate respondsToSelector:@selector(didReceiveAuthenticationChallenge:forTask:completionHandler:)]) {
-			[weakSelf.delegate didReceiveAuthenticationChallenge:challenge forTask:task completionHandler:completionHandler];
-        } else {
-            completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+        typeof(self) strongSelf = weakSelf;
+        if (strongSelf) {
+            if ([weakSelf.delegate respondsToSelector:@selector(didReceiveAuthenticationChallenge:forTask:completionHandler:)]) {
+                [weakSelf.delegate didReceiveAuthenticationChallenge:challenge forTask:task completionHandler:completionHandler];
+            } else {
+                completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, nil);
+            }
         }
 	});
 }
