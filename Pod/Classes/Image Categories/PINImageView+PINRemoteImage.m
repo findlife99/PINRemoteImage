@@ -98,7 +98,11 @@
 - (void)pin_updateUIWithRemoteImageManagerResult:(PINRemoteImageManagerResult *)result
 {
     if (result.image) {
+        self.alpha = 0.3;
         self.image = result.image;
+        [UIView transitionWithView:self duration:0.3 options:UIViewAnimationOptionTransitionCrossDissolve animations:^{
+            self.alpha = 1.0;
+        } completion:nil];
 
 #if PIN_TARGET_IOS
         [self setNeedsLayout];
