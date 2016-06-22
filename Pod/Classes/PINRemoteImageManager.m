@@ -9,6 +9,7 @@
 #import "PINRemoteImageManager.h"
 
 #import <PINCache/PINCache.h>
+#import <CommonCrypto/CommonDigest.h>
 
 #import "PINAlternateRepresentationProvider.h"
 #import "PINRemoteImage.h"
@@ -26,6 +27,10 @@
 #import "PINImage+DecodedImage.h"
 
 #define PINRemoteImageManagerDefaultTimeout  60.0
+
+//A limit of 200 characters is chosen because PINDiskCache
+//may expand the length by encoding certain characters
+#define PINRemoteImageManagerCacheKeyMaxLength 200
 
 NSOperationQueuePriority operationPriorityWithImageManagerPriority(PINRemoteImageManagerPriority priority) {
     switch (priority) {
@@ -76,6 +81,7 @@ float dataTaskPriorityWithImageManagerPriority(PINRemoteImageManagerPriority pri
 }
 
 NSString * const PINRemoteImageManagerErrorDomain = @"PINRemoteImageManagerErrorDomain";
+NSString * const PINRemoteImageCacheKey = @"cacheKey";
 typedef void (^PINRemoteImageManagerDataCompletion)(NSData *data, NSError *error);
 
 @interface NSOperationQueue (PINRemoteImageManager)
@@ -783,9 +789,10 @@ static dispatch_once_t sharedDispatchToken;
                                     priority:(PINRemoteImageManagerPriority)priority
                                   completion:(PINRemoteImageManagerDataCompletion)completion
 {
-    NSURLRequest *request = [NSURLRequest requestWithURL:url
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url
                                              cachePolicy:NSURLRequestReloadIgnoringLocalCacheData
                                          timeoutInterval:self.timeout];
+    [NSURLProtocol setProperty:key forKey:PINRemoteImageCacheKey inRequest:request];
     
     __weak typeof(self) weakSelf = self;
     PINDataTaskOperation *dataTaskOperation = [PINDataTaskOperation dataTaskOperationWithSessionManager:self.sessionManager
@@ -1056,7 +1063,8 @@ static dispatch_once_t sharedDispatchToken;
 - (void)didReceiveData:(NSData *)data forTask:(NSURLSessionDataTask *)dataTask
 {
     [self lock];
-        PINRemoteImageDownloadTask *task = [self.tasks objectForKey:[self cacheKeyForURL:[[dataTask originalRequest] URL] processorKey:nil]];
+        NSString *cacheKey = [NSURLProtocol propertyForKey:PINRemoteImageCacheKey inRequest:dataTask.originalRequest];
+        PINRemoteImageDownloadTask *task = [self.tasks objectForKey:cacheKey];
         if (task.progressImage == nil) {
             task.progressImage = [[PINProgressiveImage alloc] init];
             task.progressImage.startTime = task.sessionTaskStartTime;
@@ -1084,7 +1092,6 @@ static dispatch_once_t sharedDispatchToken;
             PINImage *progressImage = [progressiveImage currentImageBlurred:shouldBlur maxProgressiveRenderSize:maxProgressiveRenderSize renderedImageQuality:&renderedImageQuality];
             if (progressImage) {
                 [strongSelf lock];
-                    NSString *cacheKey = [strongSelf cacheKeyForURL:[[dataTask originalRequest] URL] processorKey:nil];
                     PINRemoteImageDownloadTask *task = strongSelf.tasks[cacheKey];
                     [task callProgressImageWithQueue:strongSelf.callbackQueue withImage:progressImage renderedImageQuality:renderedImageQuality];
                 [strongSelf unlock];
@@ -1098,7 +1105,7 @@ static dispatch_once_t sharedDispatchToken;
     if (error == nil && [task isKindOfClass:[NSURLSessionDataTask class]]) {
         NSURLSessionDataTask *dataTask = (NSURLSessionDataTask *)task;
         [self lock];
-            NSString *cacheKey = [self cacheKeyForURL:[[dataTask originalRequest] URL] processorKey:nil];
+            NSString *cacheKey = [NSURLProtocol propertyForKey:PINRemoteImageCacheKey inRequest:dataTask.originalRequest];
             PINRemoteImageDownloadTask *task = [self.tasks objectForKey:cacheKey];
             task.sessionTaskEndTime = CACurrentMediaTime();
             CFTimeInterval taskLength = task.sessionTaskEndTime - task.sessionTaskStartTime;
@@ -1392,6 +1399,29 @@ static dispatch_once_t sharedDispatchToken;
     if (processorKey.length > 0) {
         cacheKey = [cacheKey stringByAppendingString:[NSString stringWithFormat:@"-<%@>", processorKey]];
     }
+
+    //PINDiskCache uses this key as the filename of the file written to disk
+    //Due to the current filesystem used in Darwin, this name must be limited to 255 chars.
+    //In case the generated key exceeds PINRemoteImageManagerCacheKeyMaxLength characters,
+    //we return the hash of it instead.
+    if (cacheKey.length > PINRemoteImageManagerCacheKeyMaxLength) {
+        __block CC_MD5_CTX ctx;
+        CC_MD5_Init(&ctx);
+        NSData *data = [cacheKey dataUsingEncoding:NSUTF8StringEncoding];
+        [data enumerateByteRangesUsingBlock:^(const void * _Nonnull bytes, NSRange byteRange, BOOL * _Nonnull stop) {
+            CC_MD5_Update(&ctx, bytes, (CC_LONG)byteRange.length);
+        }];
+
+        unsigned char digest[CC_MD5_DIGEST_LENGTH];
+        CC_MD5_Final(digest, &ctx);
+
+        NSMutableString *hexString  = [NSMutableString stringWithCapacity:(CC_MD5_DIGEST_LENGTH * 2)];
+        for (int i = 0; i < CC_MD5_DIGEST_LENGTH; i++) {
+            [hexString appendFormat:@"%02lx", (unsigned long)digest[i]];
+        }
+        cacheKey = [hexString copy];
+    }
+
     return cacheKey;
 }
 
