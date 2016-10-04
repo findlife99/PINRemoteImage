@@ -11,10 +11,23 @@
 #import <PINRemoteImage/PINRemoteImage.h>
 #import <PINRemoteImage/PINURLSessionManager.h>
 #import <PINRemoteImage/PINImageView+PINRemoteImage.h>
+#import <PINRemoteImage/PINRemoteImageCaching.h>
+#import <PINCache/PINCache.h>
+
 #if USE_FLANIMATED_IMAGE
 #import <FLAnimatedImage/FLAnimatedImage.h>
 #endif
-#import <PINCache/PINCache.h>
+
+static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
+	switch (info) {
+		case kCGImageAlphaNone:
+		case kCGImageAlphaNoneSkipLast:
+		case kCGImageAlphaNoneSkipFirst:
+			return YES;
+		default:
+			return NO;
+	}
+}
 
 #if DEBUG
 @interface PINRemoteImageManager ()
@@ -98,6 +111,16 @@
     return [self JPEGURL_Medium];
 }
 
+- (NSURL *)BASE64URL
+{
+    return [NSURL URLWithString:@"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQAQMAAAAlPW0iAAAABlBMVEUAAAD///+l2Z/dAAAAM0lEQVR4nGP4/5/h/1+G/58ZDrAz3D/McH8yw83NDDeNGe4Ug9C9zwz3gVLMDA/A6P9/AFGGFyjOXZtQAAAAAElFTkSuQmCC"];
+}
+
+- (NSURL *)transparentPNGURL
+{
+	return [NSURL URLWithString:@"https://upload.wikimedia.org/wikipedia/commons/4/47/PNG_transparency_demonstration_1.png"];
+}
+
 - (NSURL *)nonTransparentWebPURL
 {
     return [NSURL URLWithString:@"https://www.gstatic.com/webp/gallery/5.webp"];
@@ -138,7 +161,7 @@
 {
     // Put teardown code here. This method is called after the invocation of each test method in the class.
     //clear disk cache
-    [self.imageManager.cache.diskCache removeAllObjects];
+    [self.imageManager.cache removeAllCachedObjects];
     self.imageManager = nil;
     [super tearDown];
 }
@@ -234,6 +257,25 @@
     [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
 }
 
+- (void)testBase64
+{
+    XCTestExpectation *expectation = [self expectationWithDescription:@"Decoding base64 image"];
+    [self.imageManager downloadImageWithURL:[self BASE64URL]
+                                    options:PINRemoteImageManagerDownloadOptionsNone
+                                 completion:^(PINRemoteImageManagerResult *result)
+     {
+         UIImage *outImage = result.image;
+         FLAnimatedImage *outAnimatedImage = result.alternativeRepresentation;
+         
+         XCTAssert(outImage && [outImage isKindOfClass:[UIImage class]], @"Failed downloading image or image is not a UIImage.");
+         XCTAssert(CGSizeEqualToSize(outImage.size, CGSizeMake(16,16)), @"Failed decoding image, image size is wrong.");
+         XCTAssert(outAnimatedImage == nil, @"Animated image is not nil.");
+         
+         [expectation fulfill];
+     }];
+    [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
+}
+
 - (void)testErrorOnNilURLDownload
 {
 #pragma clang diagnostic push
@@ -284,9 +326,8 @@
      {
          NSError *outError = result.error;
          
-         XCTAssert([outError.domain isEqualToString:NSURLErrorDomain]);
-         XCTAssert(outError.code == NSURLErrorRedirectToNonExistentLocation);
-         XCTAssert([outError.localizedDescription isEqualToString:@"The requested URL was not found on this server."]);
+         XCTAssert([outError.domain isEqualToString:PINURLErrorDomain]);
+         XCTAssert(outError.code == 404);
          
          [expectation fulfill];
     }];
@@ -350,7 +391,7 @@
 {
     NSString *key = [self.imageManager cacheKeyForURL:URL processorKey:nil];
     for (NSUInteger idx = 0; idx < 100; idx++) {
-        if ([[self.imageManager cache] objectForKey:key] != nil) {
+        if ([[self.imageManager cache] objectExistsInCacheForKey:key]) {
             break;
         }
         if (idx == 99) {
@@ -410,13 +451,15 @@
 
 - (void)testPrefetchImage
 {
-    id object = [[self.imageManager cache] objectForKey:[self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil]];
+    id key  = [self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil];
+
+    id object = [[self.imageManager cache] objectFromMemoryCacheForKey:key];
     XCTAssert(object == nil, @"image should not be in cache");
     
     [self.imageManager prefetchImageWithURL:[self JPEGURL]];
     sleep([self timeoutTimeInterval]);
     
-    object = [[self.imageManager cache] objectForKey:[self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil]];
+    object = [[self.imageManager cache] objectFromMemoryCacheForKey:key];
     XCTAssert(object, @"image was not prefetched or was not stored in cache");
 }
 
@@ -497,7 +540,7 @@
             [countLock unlock];
             XCTAssert((result.image && !result.alternativeRepresentation) || (result.alternativeRepresentation && !result.image), @"image or alternativeRepresentation not downloaded");
             if (rand() % 2) {
-                [[self.imageManager cache] removeObjectForKey:[self.imageManager cacheKeyForURL:url processorKey:nil]];
+                [[self.imageManager cache] removeCachedObjectForKey:[self.imageManager cacheKeyForURL:url processorKey:nil]];
             }
             dispatch_group_leave(group);
         }];
@@ -508,14 +551,22 @@
 
 - (void)testInvalidObject
 {
-    [self.imageManager.cache setObject:@"invalid" forKey:[self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil]];
+    NSString * const kPINRemoteImageDiskCacheName = @"PINRemoteImageManagerCache";
+    NSString *cachePath = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
+    
+    PINDiskCache *tempDiskCache = [[PINDiskCache alloc] initWithName:kPINRemoteImageDiskCacheName rootPath:cachePath serializer:^NSData * _Nonnull(id<NSCoding>  _Nonnull object) {
+        return [NSKeyedArchiver archivedDataWithRootObject:object];
+    } deserializer:^id<NSCoding> _Nonnull(NSData * _Nonnull data) {
+        return [NSKeyedUnarchiver unarchiveObjectWithData:data];
+    } fileExtension:nil];
+    
+    [tempDiskCache setObject:@"invalid" forKey:[self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil]];
     
     XCTestExpectation *expectation = [self expectationWithDescription:@"Download JPEG image"];
     [self.imageManager downloadImageWithURL:[self JPEGURL] completion:^(PINRemoteImageManagerResult *result) {
         UIImage *image = result.image;
         
         XCTAssert([image isKindOfClass:[UIImage class]], @"image should be UIImage");
-        
         [expectation fulfill];
     }];
     [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
@@ -679,8 +730,8 @@
         dispatch_semaphore_signal(semaphore);
     }];
     XCTAssert(dispatch_semaphore_wait(semaphore, [self timeout]) == 0, @"Semaphore timed out.");
-    
-    [self.imageManager.cache removeAllObjects];
+
+    [self.imageManager.cache removeAllCachedObjects];
     [self.imageManager downloadImageWithURLs:@[[self JPEGURL_Small], [self JPEGURL_Medium], [self JPEGURL_Large]]
                                      options:PINRemoteImageManagerDownloadOptionsNone
                                progressImage:nil
@@ -726,14 +777,15 @@
     //small image should have been removed from cache
     NSString *key = [self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil];
     for (NSUInteger idx = 0; idx < 100; idx++) {
-        if ([[self.imageManager cache] objectForKey:key] == nil) {
+        if ([[self.imageManager cache] objectFromMemoryCacheForKey:key] == nil) {
             break;
         }
         sleep(50);
     }
-    XCTAssert([[self.imageManager cache] objectForKey:[self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil]] == nil, @"Small image should have been removed from cache");
-    
-    [self.imageManager.cache removeAllObjects];
+    XCTAssert(
+        [[self.imageManager cache] objectFromMemoryCacheForKey:[self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil]] == nil, @"Small image should have been removed from cache");
+
+    [self.imageManager.cache removeAllCachedObjects];
     [self.imageManager setShouldUpgradeLowQualityImages:NO completion:^{
         dispatch_semaphore_signal(semaphore);
     }];
@@ -761,7 +813,7 @@
 		[expectation fulfill];
 	}];
 	
-	[self.imageManager downloadImageWithURL: [NSURL URLWithString:@"https://media-cache-ec0.pinimg.com/600x/1b/bc/c2/1bbcc264683171eb3815292d2f546e92.jpg"]
+	[self.imageManager downloadImageWithURL:[NSURL URLWithString:@"https://media-cache-ec0.pinimg.com/600x/1b/bc/c2/1bbcc264683171eb3815292d2f546e92.jpg"]
 									options:PINRemoteImageManagerDownloadOptionsNone
 								 completion:nil];
 	
@@ -771,7 +823,7 @@
 - (void)testDiskCacheOnLongURLs
 {
     XCTestExpectation *expectation = [self expectationWithDescription:@"Image is available in the disk cache"];
-    PINCache *cache = self.imageManager.cache;
+    id<PINRemoteImageCaching> cache = self.imageManager.cache;
     NSURL *longURL = [self veryLongURL];
     NSString *key = [self.imageManager cacheKeyForURL:longURL processorKey:nil];
     [self.imageManager downloadImageWithURL:longURL
@@ -779,7 +831,7 @@
                                  completion:^(PINRemoteImageManagerResult *result)
     {
         XCTAssertNotNil(result.image, @"Image should not be nil");
-        id diskCachedObj = [cache.diskCache objectForKey:key];
+        id diskCachedObj = [cache objectFromDiskCacheForKey:key];
         XCTAssertNotNil(diskCachedObj);
         [expectation fulfill];
     }];
@@ -805,6 +857,75 @@
             __unused NSString *key = [self.imageManager cacheKeyForURL:defaultURL processorKey:nil];
         }
     }];
+}
+
+- (void)testThatNondecodedJPEGImageHasNoAlpha
+{
+	XCTestExpectation *expectation = [self expectationWithDescription:@"Downloading JPEG image"];
+	[self.imageManager downloadImageWithURL:[self JPEGURL]
+									options:PINRemoteImageManagerDownloadOptionsSkipDecode
+								 completion:^(PINRemoteImageManagerResult *result)
+	 {
+		 UIImage *outImage = result.image;
+		 
+		 XCTAssert(outImage && [outImage isKindOfClass:[UIImage class]], @"Failed downloading image or image is not a UIImage.");
+		 XCTAssert(PINImageAlphaInfoIsOpaque(CGImageGetAlphaInfo(outImage.CGImage)), @"Opaque image has an alpha channel.");
+		 
+		 [expectation fulfill];
+	 }];
+	[self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
+}
+
+- (void)testThatDecodedJPEGImageHasNoAlpha
+{
+	XCTestExpectation *expectation = [self expectationWithDescription:@"Downloading JPEG image"];
+	[self.imageManager downloadImageWithURL:[self JPEGURL]
+									options:PINRemoteImageManagerDownloadOptionsNone
+								 completion:^(PINRemoteImageManagerResult *result)
+	 {
+		 UIImage *outImage = result.image;
+		 
+		 XCTAssert(outImage && [outImage isKindOfClass:[UIImage class]], @"Failed downloading image or image is not a UIImage.");
+		 XCTAssert(PINImageAlphaInfoIsOpaque(CGImageGetAlphaInfo(outImage.CGImage)), @"Opaque image has an alpha channel.");
+		 
+		 [expectation fulfill];
+	 }];
+	[self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
+}
+
+
+- (void)testThatNondecodedTransparentPNGImageHasAlpha
+{
+	XCTestExpectation *expectation = [self expectationWithDescription:@"Downloading PNG image"];
+	[self.imageManager downloadImageWithURL:[self transparentPNGURL]
+									options:PINRemoteImageManagerDownloadOptionsSkipDecode
+								 completion:^(PINRemoteImageManagerResult *result)
+	 {
+		 UIImage *outImage = result.image;
+		 
+		 XCTAssert(outImage && [outImage isKindOfClass:[UIImage class]], @"Failed downloading image or image is not a UIImage.");
+		 XCTAssertFalse(PINImageAlphaInfoIsOpaque(CGImageGetAlphaInfo(outImage.CGImage)), @"Transparent image has no alpha.");
+		 
+		 [expectation fulfill];
+	 }];
+	[self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
+}
+
+- (void)testThatDecodedTransparentPNGImageHasAlpha
+{
+	XCTestExpectation *expectation = [self expectationWithDescription:@"Downloading PNG image"];
+	[self.imageManager downloadImageWithURL:[self transparentPNGURL]
+									options:PINRemoteImageManagerDownloadOptionsNone
+								 completion:^(PINRemoteImageManagerResult *result)
+	 {
+		 UIImage *outImage = result.image;
+		 
+		 XCTAssert(outImage && [outImage isKindOfClass:[UIImage class]], @"Failed downloading image or image is not a UIImage.");
+		 XCTAssertFalse(PINImageAlphaInfoIsOpaque(CGImageGetAlphaInfo(outImage.CGImage)), @"Transparent image has no alpha.");
+		 
+		 [expectation fulfill];
+	 }];
+	[self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
 }
 
 @end
