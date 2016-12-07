@@ -53,6 +53,8 @@ typedef NS_OPTIONS(NSUInteger, PINRemoteImageManagerDownloadOptions) {
     PINRemoteImageManagerDownloadOptionsSkipEarlyCheck = 1 << 2,
     /** Save processed images as JPEGs in the cache. The default is PNG to support transparency */
     PINRemoteImageManagerSaveProcessedImageAsJPEG = 1 << 3,
+    /** Ignore cache and force download */
+    PINRemoteImageManagerDownloadOptionsIgnoreCache = 1 << 4,
 };
 
 /**
@@ -167,7 +169,7 @@ typedef void(^PINRemoteImageManagerProgressDownload)(int64_t completedBytes, int
 + (nonnull instancetype)sharedImageManager;
 
 /**
- Sets the shared instance of PINRemoteImageManager to an instance with the supplied configuration. If configuration is nil, [NSURLSessionConfiguration defaultConfiguration] is used. You specify a custom configuration if you need to configure timeout values, cookie policies, additional HTTP headers, etc. This method should not be used if the shared instance has already been created.
+ Sets the shared instance of PINRemoteImageManager to an instance with the supplied configuration. If configuration is nil, [NSURLSessionConfiguration ephemeralSessionConfiguration] is used. You specify a custom configuration if you need to configure timeout values, cookie policies, additional HTTP headers, etc. This method should not be used if the shared instance has already been created.
 
  @param configuration The configuration used to create the PINRemoteImageManager.
  */
@@ -176,6 +178,7 @@ typedef void(^PINRemoteImageManagerProgressDownload)(int64_t completedBytes, int
 
 /**
  The result of this method is assigned to self.cache in init. If you wish to provide a customized cache to the manager you can subclass PINRemoteImageManager and return a custom object, implementing PINRemoteImageCaching protocol from this method. Same effect could be achieved by using initWithSessionConfiguration:alternativeRepresentationProvider:imageCache: initializer.
+  @warning This method is meant only for override. It will be called *once* by an instance of PINRemoteImageManager. The default implementation creates a new cache on every call. If you're looking to access the cache being used by an instance of PINRemoteImageManager, @c cache.
  @return An instance of a object, implementing PINRemoteImageCaching protocol.
  */
 - (nonnull id<PINRemoteImageCaching>)defaultImageCache;

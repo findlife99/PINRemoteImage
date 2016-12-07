@@ -161,7 +161,7 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
 {
     // Put teardown code here. This method is called after the invocation of each test method in the class.
     //clear disk cache
-    [self.imageManager.cache removeAllCachedObjects];
+    [self.imageManager.cache removeAllObjects];
     self.imageManager = nil;
     [super tearDown];
 }
@@ -236,6 +236,23 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
         
         [expectation fulfill];
     }];
+    [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
+}
+
+- (void)testIgnoreCache
+{
+    [self.imageManager downloadImageWithURL:[self JPEGURL] completion:nil];
+    [self waitForImageWithURLToBeCached:[self JPEGURL]];
+
+    XCTestExpectation *expectation = [self expectationWithDescription:@"Download ignoring cache"];
+    [self.imageManager downloadImageWithURL:[self JPEGURL]
+                                    options:PINRemoteImageManagerDownloadOptionsIgnoreCache
+                                 completion:^(PINRemoteImageManagerResult *result)
+     {
+         XCTAssert(result.resultType == PINRemoteImageResultTypeDownload, @"Image was fetched from cache");
+
+         [expectation fulfill];
+     }];
     [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
 }
 
@@ -391,7 +408,7 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
 {
     NSString *key = [self.imageManager cacheKeyForURL:URL processorKey:nil];
     for (NSUInteger idx = 0; idx < 100; idx++) {
-        if ([[self.imageManager cache] objectExistsInCacheForKey:key]) {
+        if ([[self.imageManager cache] objectExistsForKey:key]) {
             break;
         }
         if (idx == 99) {
@@ -453,13 +470,13 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
 {
     id key  = [self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil];
 
-    id object = [[self.imageManager cache] objectFromMemoryCacheForKey:key];
+    id object = [[self.imageManager cache] objectFromMemoryForKey:key];
     XCTAssert(object == nil, @"image should not be in cache");
     
     [self.imageManager prefetchImageWithURL:[self JPEGURL]];
     sleep([self timeoutTimeInterval]);
     
-    object = [[self.imageManager cache] objectFromMemoryCacheForKey:key];
+    object = [[self.imageManager cache] objectFromMemoryForKey:key];
     XCTAssert(object, @"image was not prefetched or was not stored in cache");
 }
 
@@ -540,7 +557,7 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
             [countLock unlock];
             XCTAssert((result.image && !result.alternativeRepresentation) || (result.alternativeRepresentation && !result.image), @"image or alternativeRepresentation not downloaded");
             if (rand() % 2) {
-                [[self.imageManager cache] removeCachedObjectForKey:[self.imageManager cacheKeyForURL:url processorKey:nil]];
+                [[self.imageManager cache] removeObjectForKey:[self.imageManager cacheKeyForURL:url processorKey:nil]];
             }
             dispatch_group_leave(group);
         }];
@@ -553,10 +570,10 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
 {
     NSString * const kPINRemoteImageDiskCacheName = @"PINRemoteImageManagerCache";
     NSString *cachePath = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES) firstObject];
-    
-    PINDiskCache *tempDiskCache = [[PINDiskCache alloc] initWithName:kPINRemoteImageDiskCacheName rootPath:cachePath serializer:^NSData * _Nonnull(id<NSCoding>  _Nonnull object) {
+  
+    PINDiskCache *tempDiskCache = [[PINDiskCache alloc] initWithName:kPINRemoteImageDiskCacheName rootPath:cachePath serializer:^NSData * _Nonnull(id<NSCoding>  _Nonnull object, NSString * _Nonnull key) {
         return [NSKeyedArchiver archivedDataWithRootObject:object];
-    } deserializer:^id<NSCoding> _Nonnull(NSData * _Nonnull data) {
+    } deserializer:^id<NSCoding> _Nonnull(NSData * _Nonnull data, NSString * _Nonnull key) {
         return [NSKeyedUnarchiver unarchiveObjectWithData:data];
     } fileExtension:nil];
     
@@ -571,6 +588,19 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
     }];
     [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
     
+}
+
+- (void)testImageFromCacheReturnsNilErrorForCacheMiss
+{
+    XCTestExpectation *expectation = [self expectationWithDescription:@"Image from cache"];
+
+    [self.imageManager imageFromCacheWithCacheKey:[self.imageManager cacheKeyForURL:[self JPEGURL] processorKey:nil] options:PINRemoteImageManagerDownloadOptionsNone completion:^(PINRemoteImageManagerResult * _Nonnull result) {
+         XCTAssert(result.image == nil, @"Image was found in cache");
+         XCTAssert(result.error == nil, @"Error was returned in cache miss");
+
+         [expectation fulfill];
+     }];
+    [self waitForExpectationsWithTimeout:[self timeoutTimeInterval] handler:nil];
 }
 
 - (void)testProcessingLoad
@@ -731,7 +761,7 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
     }];
     XCTAssert(dispatch_semaphore_wait(semaphore, [self timeout]) == 0, @"Semaphore timed out.");
 
-    [self.imageManager.cache removeAllCachedObjects];
+    [self.imageManager.cache removeAllObjects];
     [self.imageManager downloadImageWithURLs:@[[self JPEGURL_Small], [self JPEGURL_Medium], [self JPEGURL_Large]]
                                      options:PINRemoteImageManagerDownloadOptionsNone
                                progressImage:nil
@@ -777,15 +807,15 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
     //small image should have been removed from cache
     NSString *key = [self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil];
     for (NSUInteger idx = 0; idx < 100; idx++) {
-        if ([[self.imageManager cache] objectFromMemoryCacheForKey:key] == nil) {
+        if ([[self.imageManager cache] objectFromMemoryForKey:key] == nil) {
             break;
         }
         sleep(50);
     }
     XCTAssert(
-        [[self.imageManager cache] objectFromMemoryCacheForKey:[self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil]] == nil, @"Small image should have been removed from cache");
+        [[self.imageManager cache] objectFromMemoryForKey:[self.imageManager cacheKeyForURL:[self JPEGURL_Small] processorKey:nil]] == nil, @"Small image should have been removed from cache");
 
-    [self.imageManager.cache removeAllCachedObjects];
+    [self.imageManager.cache removeAllObjects];
     [self.imageManager setShouldUpgradeLowQualityImages:NO completion:^{
         dispatch_semaphore_signal(semaphore);
     }];
@@ -831,7 +861,7 @@ static inline BOOL PINImageAlphaInfoIsOpaque(CGImageAlphaInfo info) {
                                  completion:^(PINRemoteImageManagerResult *result)
     {
         XCTAssertNotNil(result.image, @"Image should not be nil");
-        id diskCachedObj = [cache objectFromDiskCacheForKey:key];
+        id diskCachedObj = [cache objectFromDiskForKey:key];
         XCTAssertNotNil(diskCachedObj);
         [expectation fulfill];
     }];
